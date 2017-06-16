@@ -1,3 +1,3 @@
 # jwkj
 
-jwkj 脚本
+jwkj 物联网优化脚本
