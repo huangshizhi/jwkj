@@ -3,6 +3,8 @@
 Created on Thu Apr 20 10:04:41 2017
 
 @author: huangshizhi
+
+物联网流量分配方案
 """
 
 import pandas as pd
