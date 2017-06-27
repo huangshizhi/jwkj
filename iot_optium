@@ -1,0 +1,233 @@
+
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Jun 23 15:14:36 2017
+
+@author: huangshizhi
+"""
+
+import pandas as pd
+import pulp as pl
+import time
+from datetime import datetime
+from sqlalchemy import create_engine
+from sqlalchemy.types import String,Integer,Numeric
+
+
+'''
+根据当月物联网数据，判断是否有iccid重复
+'''
+def is_duplicate(pdata):
+    #判断iccid是否重复
+    iccid_duplicated_df = pdata[pdata.duplicated(['iccid'], keep='first')] 
+    iccid_duplicated_list = iccid_duplicated_df['iccid'].tolist()
+    if len(iccid_duplicated_list)>0:
+        print("该月份物联网数据有重复,重复个数为%-6.0f" % int(len(iccid_duplicated_list)))
+        print(iccid_duplicated_list)
+    else:
+        print("该月物联网卡数据无重复!")
+        
+''' 
+根据流量资费数据，得到套餐list,套餐资费和套餐类型字典
+'''       
+def get_package_dict(ptest):
+    ptest.index = ptest['packages'].tolist()
+    plist = ptest.index.tolist()
+    df = ptest.to_dict(orient='dict')
+    
+    costs_dict = df['package_cost']
+    package_type_dict = df['package_type']
+    
+    return plist,costs_dict,package_type_dict
+    
+
+'''
+套餐够用，多余流量为0；套餐不够用，多出的流量取绝对值。
+'''
+
+def sign(a):
+    if a>=0:
+        return 0
+    else:
+        return abs(a)
+        
+'''
+得到套餐分组信息的统计信息
+'''
+def get_stats(group):
+    return {'min':group.min(),'sum':group.sum(),
+            'count':group.count(),'max':group.max()}
+
+'''
+计算物联网套餐资费总价
+'''
+
+def compute_iot_total(iot_data):
+    #按套餐类型分组
+    grouped = iot_data['flow'].groupby(iot_data['package_type'])    
+    count_data = grouped.apply(get_stats).unstack()
+    #重置索引
+    decribe_data = count_data.reset_index()
+    #合并数据
+    cdata = pd.merge(left = decribe_data,right = package_price,how='left',on = 'package_type')
+    #判断是否超出套餐流量，超出按每M0.2048元计费，不超出则为0
+    cdata['flow_delta'] = cdata['sum'] - cdata['package_type']*cdata['count']
+    cdata['sign_liliang'] = cdata['flow_delta'].apply(lambda x :sign(-x)*0.2048)           
+    #计算各个套餐总价
+    cdata['flow_total'] = cdata['count']*cdata['package_cost']+cdata['sign_liliang']
+    return  round(cdata['flow_total'].sum(),2)
+    
+'''
+核心代码
+根据流量总和和物联网卡个数，求出最优解；
+参数flow_sum为流量总和，flow_length为物联网数量个数，
+plist为套餐类型,形如:['12MB', '30MB', '500MB', '1G', '2G']
+costs_dict为各自套餐对应的资费，形如 {'2G': 90.0, '1G': 60.0, '500MB': 30.0, '30MB': 5.0, '12MB': 2.5}
+package_type_dict为套餐类型对应流量数值，单位为MB
+返回最优资费minum_value
+
+'''
+def min_amount(pdata,plist,costs_dict,package_type_dict):
+    flow_length = len(pdata)  #总的卡个数   
+    flow_sum = pdata['flow'].sum()   
+    prob=pl.LpProblem('jwkj',pl.LpMinimize)  
+    #定义套餐变量
+    pack_vars = pl.LpVariable.dicts("package",plist,0,cat='Integer')       
+    #目标函数   
+    prob += pl.lpSum([costs_dict[i]*pack_vars[i] for i in plist])    
+    #约束条件
+    prob += pl.lpSum([pack_vars[i] for i in plist]) == flow_length #个数约束    
+    prob += pl.lpSum([package_type_dict[i]* pack_vars[i] for i in plist])>=flow_sum #套餐约束
+    #问题求解
+    prob.solve()
+    
+    '''
+    # 显示结果
+    for v in prob.variables():
+        print((v.name,v.varValue))
+    '''
+    var_list = prob.variables()
+    var_item={}
+    #各个套餐类型及其所需个数
+    for v in var_list:
+        print((v.name,v.varValue))
+        var_item[v.name]=int(v.varValue)
+    #做变换                                    
+    package_item = {}
+    for k,v in var_item.items():
+        s = k[8:]
+        package_item[package_type_dict[s]]=v                       
+                                        
+    minum_value = pl.value(prob.objective)
+    print("理论最优资费为:%6.2f" %minum_value)
+    return minum_value,package_item   
+
+
+'''
+输入pdata，需要优化的数据
+套餐类型字典package_type_dict，{'12MB': 12, '500MB': 500, '30MB': 30, '1G': 1024, '2G': 2048}
+套餐资费字典costs_dict，{'12MB': 12, '500MB': 500, '30MB': 30, '1G': 1024, '2G': 2048}
+套餐类型列表 ['12MB', '30MB', '500MB', '1G', '2G']
+返回物联网优化后的套餐数据，iot_data_all
+
+'''
+def get_optium(pdata,package_type_dict,costs_dict,package_list):
+    prob=pl.LpProblem('iot_optium',pl.LpMinimize)  
+    var_list = pdata['iccid'].tolist()
+    flow_list = pdata['flow'].tolist()     
+    flow_used_list={}
+    for i in range(len(var_list)):
+        flow_used_list[var_list[i]] = flow_list[i]
+    #定义套餐变量
+    iot_choices = pl.LpVariable.dicts("iot",(var_list,package_list),lowBound = 0,upBound = 1,cat = pl.LpInteger)    
+
+    #目标函数       
+    #prob += pl.lpSum([(package_type_dict[p]*iot_choices[i][p]) for i in var_list for p in package_list])
+    prob += pl.lpSum(pl.lpSum([costs_dict[p]*iot_choices[i][p] for i in var_list]) for p in package_list)
+
+    #个数约束    
+    for v in var_list:
+        prob += pl.lpSum([iot_choices[v][p] for p in package_list]) == 1
+           
+    for p in package_list:
+        prob += pl.lpSum([flow_used_list[i]*iot_choices[i][p] for i in var_list ]) \
+            <= pl.lpSum([package_type_dict[p]*iot_choices[i][p] for i in var_list ])   
+    
+    #print([package_type_dict[i] for i in package_list])    
+    #问题求解
+    start_time = time.time()
+    #prob.writeLP(r"D:\study\LP\test_data\jwkj_iot.lp")
+    prob.solve()
+    #prob.solve(pl.GLPK(r"D:\ad_portrait\software\glpk-4.62\glpk-4.62\w64\glpsol.exe",options=['--mipgap', '0.01']))
+    #prob.solve(pl.GLPK(r"D:\ad_portrait\software\glpk-4.62\glpk-4.62\w64\glpsol.exe",options=['--tmlim', '60']))
+
+    #prob.solve(pl.GUROBI(timeLimit=30))
+    #prob.solve(pl.CPLEX(timeLimit = 90))
+    #prob.solve(pl.CPLEX_DLL(changeEpgap = 0.1))
+
+    end_time = time.time()
+    print("求解变量个数:%.0f" % (len(iot_choices)))
+    print("求解最优化问题耗时:%.2f 秒" %(end_time-start_time))
+    
+    prob.writeLP(r"D:\ad_portrait\物联网卡资费\code\latest\simple.lp")
+    '''
+    # 显示结果
+    for v in prob.variables():
+        print((v.name,v.varValue))
+    '''
+    try:
+        if (prob.status == -1):
+            print("找不到最优解!数据有误，请重试！")                           
+        else:
+            item_list=[]       
+            #各个套餐类型及其所需个数
+            for v in prob.variables():
+                var_item={}
+                var_item['iccid'],var_item['value'] =(v.name[4:],v.varValue)  
+                item_list.append(var_item)
+              
+            pitem = pd.DataFrame(item_list)                         
+            choice_df =pitem[pitem['value']>0]    
+            #拆分变量成两列
+            choice_split =choice_df['iccid'].str.split('_',2,expand=True)
+            choice_split.columns =['iccid','packages']
+            #合并数据
+            iot_package_type = pd.merge(left = choice_split,right = pdata,how='left',on= 'iccid')
+            iot_data_all = pd.merge(left = iot_package_type,right = package_price,how='left',on = 'packages')
+            return iot_data_all    
+    except Exception as e :
+        print("数据异常！请重试！")
+        print(e)
+
+
+    
+if __name__=='__main__': 
+    #加载数据
+    #pdata_init = pd.read_csv(r'D:\ad_portrait\物联网卡资费\数据\测试数据\random_test_10000.csv')
+    pdata_init = pd.read_excel(r'D:\ad_portrait\物联网卡资费\code\测试数据.xlsx',sheetname='month_201706_zj')
+    pdata_init['iccid'] = pdata_init['iccid'].astype('str')
+    pdata_init['iccid']= pdata_init['iccid'].str.strip()
+
+    is_duplicate(pdata_init) #判断物联网数据是否有重复   
+    pdata = pdata_init.drop_duplicates(['iccid']) #只计算考虑iccid没有重复的情况  
+    package_price = pd.read_excel(r'D:\ad_portrait\物联网卡资费\package_price.xlsx',sheetname="浙江联通")
+    
+    package_list = package_price['packages'].tolist()
+    plist,costs_dict,package_type_dict  = get_package_dict(package_price)
+    #重置索引 #package_price.index = range(len(package_price))  
+    #计算得到理论最优值，以便进行比较
+    minum_value,package_item = min_amount(pdata,plist,costs_dict,package_type_dict)
+   
+    #计算得到实际优化后的套餐值
+    iot_data = get_optium(pdata,package_type_dict,costs_dict,package_list)    
+          
+    #流量套餐总价
+    package_sum = compute_iot_total(iot_data)        
+    amount_ratio = package_sum/minum_value #最优解的倍数    
+    print("流量套餐总价为%-10.2f,最优资费总价为%-10.2f" %(package_sum,minum_value))
+    print("求得的解与最优解的比值:%-10.2f" %amount_ratio)
+    
+    iot_data.to_excel(r"D:\ad_portrait\物联网卡资费\code\latest\random_test_1_12.xlsx",index=False)
+
+
+
