@@ -5,6 +5,8 @@ Created on Thu Apr 20 10:04:41 2017
 @author: huangshizhi
 
 物联网流量分配方案
+
+早期的方法，存在的问题较多，不再使用
 """
 
 import pandas as pd
