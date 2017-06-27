@@ -132,6 +132,15 @@ def min_amount(pdata,plist,costs_dict,package_type_dict):
 
 '''
 def get_optium(pdata,package_type_dict,costs_dict,package_list):
+    #变换精度大小
+    plen = pdata.index
+    plength = len("%d"%len(plen))   
+    mip_ceil = math.ceil(len(plen)/(10**(plength-1))) 
+    mipgap = 0.01
+    if  plength > 3:
+        mipgap = min(0.01,mip_ceil/(10**(plength-1)))
+    print("误差精度大小为:%.2f" %mipgap)
+    
     prob=pl.LpProblem('iot_optium',pl.LpMinimize)  
     var_list = pdata['iccid'].tolist()
     flow_list = pdata['flow'].tolist()     
